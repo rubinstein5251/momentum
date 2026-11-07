@@ -1,0 +1,38 @@
+{
+  "global": {
+    "candidates_evaluated": 9,
+    "enter_decisions": 0,
+    "orders_submitted": 0,
+    "fok_filled": 0,
+    "fok_failed": 0,
+    "by_reason": {
+      "momentum_yes_mismatch:no_edge": 6,
+      "candidate_tick": 3
+    },
+    "by_stage": {
+      "pipeline": 3,
+      "momentum_or_probability": 3,
+      "candidate_log": 3
+    },
+    "updated_at": 1794055736.6823075
+  },
+  "workers": {
+    "btc:5m": {
+      "candidates_evaluated": 9,
+      "enter_decisions": 0,
+      "orders_submitted": 0,
+      "fok_filled": 0,
+      "fok_failed": 0,
+      "by_reason": {
+        "momentum_yes_mismatch:no_edge": 6,
+        "candidate_tick": 3
+      },
+      "by_stage": {
+        "pipeline": 3,
+        "momentum_or_probability": 3,
+        "candidate_log": 3
+      },
+      "updated_at": 1794055736.6823108
+    }
+  }
+}

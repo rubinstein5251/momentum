@@ -1,0 +1,53 @@
+{
+  "defaults": {
+    "momentum_strategy_enabled": true,
+    "inventory_accumulation_enabled": false,
+    "live_trading_enabled": false,
+    "dry_run": true,
+    "enabled": true,
+    "entry_price": 0.93,
+    "entry_window_seconds": 90,
+    "stop_loss_pct": 0.39,
+    "stop_loss_percent": 39,
+    "target_shares_per_side": 5,
+    "max_shares_per_side": 5,
+    "max_shares": 5,
+    "max_position_size": 5,
+    "max_combined_inventory": 10,
+    "max_purchase_size": 5,
+    "order_type": "FAK",
+    "inventory_execution_type": "FAK",
+    "execution_type": "FAK",
+    "order_size_min": 5,
+    "order_size_max": 5,
+    "max_order_size": 5,
+    "min_order_size": 5,
+    "stop_loss_exit_max_retries": 5,
+    "stop_loss_exit_retry_ms": 400,
+    "fill_timeout_ms": 10000,
+    "fill_poll_ms": 400,
+    "listener_activate_secs": 300,
+    "min_time_before_close_seconds": 0,
+    "max_quote_age_seconds": 3.0,
+    "estimated_fee_rate": 0.0,
+    "max_slippage": 0.005
+  },
+  "workers": [
+    {
+      "asset": "btc",
+      "window": "5m"
+    },
+    {
+      "asset": "eth",
+      "window": "5m"
+    },
+    {
+      "asset": "sol",
+      "window": "5m"
+    },
+    {
+      "asset": "xrp",
+      "window": "5m"
+    }
+  ]
+}
