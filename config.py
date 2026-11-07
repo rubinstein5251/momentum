@@ -231,7 +231,6 @@ class WorkerConfig:
     gabagool_falling_knife_fast_drop: float = 0.015
     gabagool_falling_knife_recovery_cents: float = 1.5
     gabagool_falling_knife_cooldown_seconds: float = 5.0
-    gabagool_falling_knife_binance_confirm: float = 0.10
 
     # Arbigab-style three-engine architecture
     momentum_engine_enabled: bool = True
@@ -257,7 +256,6 @@ class WorkerConfig:
     spread_capture_second_leg_timeout_ms: int = 10000
     spread_capture_max_recovery_loss: float = 2.0
     spread_capture_release_blocked_to_eligible: bool = False
-    spread_capture_binance_volatility_block: bool = True
     inventory_max_pair_cost: float = 0.98
     inventory_min_net_edge: float = 0.02
     inventory_max_capital_per_market: float = 40.0
@@ -278,25 +276,6 @@ class WorkerConfig:
     price_drop_window_seconds: float = 15.0
     max_price_drop_percent: float = 3.5
     falling_knife_cooldown_seconds: float = 5.0
-    binance_fok_enabled: bool = True
-    binance_fok_signal_windows_ms: tuple = (1000.0, 3000.0, 5000.0)
-    binance_fok_up_move_threshold_pct: float = 0.0008
-    binance_fok_down_move_threshold_pct: float = 0.0008
-    binance_fok_signal_cooldown_ms: float = 3000.0
-    binance_fok_max_signal_latency_ms: float = 500.0
-    binance_fok_max_binance_data_age_ms: float = 1500.0
-    binance_fok_max_combined_pair_cost: float = 0.985
-    binance_fok_min_net_pair_edge: float = 0.01
-    binance_fok_max_entry_price: float = 0.85
-    binance_fok_max_hedge_price: float = 0.85
-    binance_fok_max_slippage: float = 0.005
-    binance_fok_max_hedge_delay_ms: float = 2500.0
-    binance_fok_max_unhedged_exposure_usd: float = 15.0
-    binance_fok_max_capital_per_trade: float = 10.0
-    preemptive_cancel_enabled: bool = True
-    preemptive_cancel_imbalance: float = 0.18
-    preemptive_cancel_momentum: float = 0.10
-    preemptive_cancel_price_delta: float = 0.0015
     trade_cooldown_ms: int = 3000
     order_size_min: float = 5.0
     order_size_max: float = 5.0
@@ -696,11 +675,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         _cfg_get(raw, defaults, "gabagool_falling_knife_cooldown_seconds", default=5.0),
         5.0,
     )
-    gabagool_falling_knife_binance_confirm = _parse_nonnegative_float(
-        "gabagool_falling_knife_binance_confirm",
-        _cfg_get(raw, defaults, "gabagool_falling_knife_binance_confirm", default=0.10),
-        0.10,
-    )
     if gabagool_falling_knife_window_seconds <= 0:
         _fatal(f"{asset}:{window}: gabagool_falling_knife_window_seconds must be > 0")
     if gabagool_falling_knife_fast_window_seconds <= 0:
@@ -771,11 +745,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         "spread_capture_release_blocked_to_eligible",
         _cfg_get(raw, defaults, "spread_capture_release_blocked_to_eligible", default=False),
         False,
-    )
-    spread_capture_binance_volatility_block = _parse_bool_value(
-        "spread_capture_binance_volatility_block",
-        _cfg_get(raw, defaults, "spread_capture_binance_volatility_block", default=True),
-        True,
     )
     inventory_accumulation_enabled = _parse_bool_value(
         "inventory_accumulation_enabled",
@@ -945,88 +914,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         _fatal(f"{asset}:{window}: price_drop_window_seconds must be > 0")
     if stabilization_window_seconds <= 0:
         _fatal(f"{asset}:{window}: stabilization_window_seconds must be > 0")
-    from utils.btc_signal import parse_signal_windows_ms
-
-    binance_fok_enabled = _parse_bool_value(
-        "binance_fok_enabled",
-        _cfg_get(raw, defaults, "binance_fok_enabled", default=True),
-        True,
-    )
-    windows_raw = _cfg_get(
-        raw, defaults, "binance_fok_signal_windows_ms", "btc_signal_window_ms",
-        default=[1000, 3000, 5000],
-    )
-    binance_fok_signal_windows_ms = tuple(parse_signal_windows_ms(windows_raw))
-    binance_fok_up_move_threshold_pct = _parse_nonnegative_float(
-        "binance_fok_up_move_threshold_pct",
-        _cfg_get(raw, defaults, "binance_fok_up_move_threshold_pct", "btc_up_move_threshold_pct", default=0.0008),
-        0.0008,
-    )
-    binance_fok_down_move_threshold_pct = _parse_nonnegative_float(
-        "binance_fok_down_move_threshold_pct",
-        _cfg_get(raw, defaults, "binance_fok_down_move_threshold_pct", "btc_down_move_threshold_pct", default=0.0008),
-        0.0008,
-    )
-    binance_fok_signal_cooldown_ms = _parse_nonnegative_float(
-        "binance_fok_signal_cooldown_ms",
-        _cfg_get(raw, defaults, "binance_fok_signal_cooldown_ms", "signal_cooldown_ms", default=3000.0),
-        3000.0,
-    )
-    binance_fok_max_signal_latency_ms = _parse_nonnegative_float(
-        "binance_fok_max_signal_latency_ms",
-        _cfg_get(raw, defaults, "binance_fok_max_signal_latency_ms", "max_signal_latency_ms", default=500.0),
-        500.0,
-    )
-    binance_fok_max_binance_data_age_ms = _parse_nonnegative_float(
-        "binance_fok_max_binance_data_age_ms",
-        _cfg_get(raw, defaults, "binance_fok_max_binance_data_age_ms", "max_binance_data_age_ms", default=1500.0),
-        1500.0,
-    )
-    binance_fok_max_combined_pair_cost = _parse_unit_fraction(
-        "binance_fok_max_combined_pair_cost",
-        _cfg_get(raw, defaults, "binance_fok_max_combined_pair_cost", "max_combined_pair_cost", default=0.985),
-        0.985,
-    )
-    binance_fok_min_net_pair_edge = _parse_nonnegative_float(
-        "binance_fok_min_net_pair_edge",
-        _cfg_get(raw, defaults, "binance_fok_min_net_pair_edge", "min_net_pair_edge", default=0.01),
-        0.01,
-    )
-    binance_fok_max_entry_price = _parse_unit_fraction(
-        "binance_fok_max_entry_price",
-        _cfg_get(raw, defaults, "binance_fok_max_entry_price", default=0.85),
-        0.85,
-    )
-    binance_fok_max_hedge_price = _parse_unit_fraction(
-        "binance_fok_max_hedge_price",
-        _cfg_get(raw, defaults, "binance_fok_max_hedge_price", "max_hedge_price", default=0.85),
-        0.85,
-    )
-    binance_fok_max_slippage = _parse_nonnegative_float(
-        "binance_fok_max_slippage",
-        _cfg_get(raw, defaults, "binance_fok_max_slippage", "max_slippage", default=0.005),
-        0.005,
-    )
-    binance_fok_max_hedge_delay_ms = _parse_nonnegative_float(
-        "binance_fok_max_hedge_delay_ms",
-        _cfg_get(raw, defaults, "binance_fok_max_hedge_delay_ms", "max_hedge_delay_ms", default=2500.0),
-        2500.0,
-    )
-    binance_fok_max_unhedged_exposure_usd = _parse_nonnegative_float(
-        "binance_fok_max_unhedged_exposure_usd",
-        _cfg_get(raw, defaults, "binance_fok_max_unhedged_exposure_usd", default=15.0),
-        15.0,
-    )
-    binance_fok_max_capital_per_trade = _parse_nonnegative_float(
-        "binance_fok_max_capital_per_trade",
-        _cfg_get(raw, defaults, "binance_fok_max_capital_per_trade", default=10.0),
-        10.0,
-    )
-    preemptive_cancel_enabled = _parse_bool_value("preemptive_cancel_enabled", _cfg_get(raw, defaults, "preemptive_cancel_enabled", default=True), True)
-    preemptive_cancel_imbalance = _parse_nonnegative_float("preemptive_cancel_imbalance", _cfg_get(raw, defaults, "preemptive_cancel_imbalance", default=0.18), 0.18)
-    preemptive_cancel_momentum = _parse_nonnegative_float("preemptive_cancel_momentum", _cfg_get(raw, defaults, "preemptive_cancel_momentum", default=0.10), 0.10)
-    preemptive_cancel_price_delta = _parse_nonnegative_float("preemptive_cancel_price_delta", _cfg_get(raw, defaults, "preemptive_cancel_price_delta", default=0.0015), 0.0015)
-
     trade_cooldown_ms = _parse_cooldown_ms(
         "trade_cooldown_ms",
         _cfg_get(raw, defaults, "trade_cooldown_ms"),
@@ -1204,7 +1091,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         gabagool_falling_knife_fast_drop=gabagool_falling_knife_fast_drop,
         gabagool_falling_knife_recovery_cents=gabagool_falling_knife_recovery_cents,
         gabagool_falling_knife_cooldown_seconds=gabagool_falling_knife_cooldown_seconds,
-        gabagool_falling_knife_binance_confirm=gabagool_falling_knife_binance_confirm,
         momentum_engine_enabled=momentum_engine_enabled,
         momentum_min_delta=momentum_min_delta,
         momentum_signal_max_age=momentum_signal_max_age,
@@ -1228,7 +1114,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         spread_capture_second_leg_timeout_ms=spread_capture_second_leg_timeout_ms,
         spread_capture_max_recovery_loss=spread_capture_max_recovery_loss,
         spread_capture_release_blocked_to_eligible=spread_capture_release_blocked_to_eligible,
-        spread_capture_binance_volatility_block=spread_capture_binance_volatility_block,
         inventory_max_pair_cost=inventory_max_pair_cost,
         inventory_min_net_edge=inventory_min_net_edge,
         inventory_max_capital_per_market=inventory_max_capital_per_market,
@@ -1249,25 +1134,6 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
         price_drop_window_seconds=price_drop_window_seconds,
         max_price_drop_percent=max_price_drop_percent,
         falling_knife_cooldown_seconds=falling_knife_cooldown_seconds,
-        binance_fok_enabled=binance_fok_enabled,
-        binance_fok_signal_windows_ms=binance_fok_signal_windows_ms,
-        binance_fok_up_move_threshold_pct=binance_fok_up_move_threshold_pct,
-        binance_fok_down_move_threshold_pct=binance_fok_down_move_threshold_pct,
-        binance_fok_signal_cooldown_ms=binance_fok_signal_cooldown_ms,
-        binance_fok_max_signal_latency_ms=binance_fok_max_signal_latency_ms,
-        binance_fok_max_binance_data_age_ms=binance_fok_max_binance_data_age_ms,
-        binance_fok_max_combined_pair_cost=binance_fok_max_combined_pair_cost,
-        binance_fok_min_net_pair_edge=binance_fok_min_net_pair_edge,
-        binance_fok_max_entry_price=binance_fok_max_entry_price,
-        binance_fok_max_hedge_price=binance_fok_max_hedge_price,
-        binance_fok_max_slippage=binance_fok_max_slippage,
-        binance_fok_max_hedge_delay_ms=binance_fok_max_hedge_delay_ms,
-        binance_fok_max_unhedged_exposure_usd=binance_fok_max_unhedged_exposure_usd,
-        binance_fok_max_capital_per_trade=binance_fok_max_capital_per_trade,
-        preemptive_cancel_enabled=preemptive_cancel_enabled,
-        preemptive_cancel_imbalance=preemptive_cancel_imbalance,
-        preemptive_cancel_momentum=preemptive_cancel_momentum,
-        preemptive_cancel_price_delta=preemptive_cancel_price_delta,
         trade_cooldown_ms=trade_cooldown_ms,
         order_size_min=order_size_min,
         order_size_max=order_size_max,

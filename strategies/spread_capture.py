@@ -1,22 +1,18 @@
-"""Backward-compatible exports — active strategy is inventory accumulation."""
+"""Compatibility exports for the active single-position directional strategy."""
 
 from strategies.inventory_accumulation_strategy import (
-    InventoryAccumulationStrategy,
-    MomentumStrategy,
+    DirectionalFokStrategy,
     GabagoolStrategy,
-    SpreadCaptureStrategy,
+    InventoryAccumulationStrategy,
     LateEntryStrategy,
-    BinanceTriggeredFokStrategy,
-    BinanceFokStrategy,
+    MomentumStrategy,
+    SpreadCaptureStrategy,
 )
 
 SpreadCaptureDecision = None
-BinanceFokDecision = None
 
 __all__ = [
-    "BinanceFokDecision",
-    "BinanceFokStrategy",
-    "BinanceTriggeredFokStrategy",
+    "DirectionalFokStrategy",
     "GabagoolStrategy",
     "InventoryAccumulationStrategy",
     "LateEntryStrategy",

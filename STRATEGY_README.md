@@ -13,11 +13,6 @@ The active strategy is a single-position directional strategy.
   `entry_window_seconds` or `ENTRY_WINDOW_SECONDS`.
 - The market-data WebSocket starts 5 seconds before the entry window by default
   (`listener_activate_secs: 95` for a 90-second entry window).
-- New entries require a fresh Binance underlying-price feed and a stable rolling
-  window. Defaults: 10-second range no greater than 0.20%, and 5-second movement
-  no greater than 0.15%. Both are configurable in `trading_config.json`.
-- New entries require a full-size executable Polymarket ask walk and at least
-  `min_orderbook_depth` displayed shares. Missing depth is not treated as liquidity.
 - Stop loss defaults to 39% below the confirmed average fill price. For a 0.93 fill,
   the trigger is 0.5673.
 - Stop-loss exits retain the project's FOK execution type. The sell limit is derived
@@ -38,11 +33,6 @@ The active strategy is a single-position directional strategy.
 - `entry_window_seconds`: `90`
 - `stop_loss_pct`: `0.39`
 - `listener_activate_secs`: `95`
-- `stabilization_window_seconds`: `10`
-- `stabilization_tolerance_percent`: `0.20`
-- `short_window_seconds`: `5`
-- `max_short_window_move_percent`: `0.15`
-- `min_orderbook_depth`: `5`
 
 ## Setup
 
@@ -67,3 +57,16 @@ cannot be filled, the exchange may reject/cancel the FOK order. Core operational
 safeguards remain: valid active market and quotes, market not closed, no open
 position or duplicate order, trading enabled, and permanent stopped-out-market
 protection. The 39% stop-loss path is unchanged.
+
+## External market-data integrations
+
+The Binance market-data feed, depth-imbalance signal, exchange-triggered callbacks,
+preemptive-cancel integration, and related configuration have been removed. The bot
+uses Polymarket market data for its configured entry and stop-loss decisions; no
+Binance WebSocket or REST market-data connection is started.
+
+A Polymarket CLOB response of HTTP 403 with `Trading restricted in your region` is
+an access restriction imposed by Polymarket. Removing the Binance integration does
+not change that restriction or make order submission available in a blocked region.
+Check Polymarket's current supported-region information and do not attempt to
+circumvent the restriction.

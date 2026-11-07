@@ -8,7 +8,7 @@ class InventoryStrategyIntegrationTests(unittest.TestCase):
     def test_no_legacy_stop_loss_monitor_in_tick_path(self):
         source = (ROOT / "bot.py").read_text(encoding="utf-8")
         start = source.index("    async def check_logic(self, timer: str):")
-        end = source.index("    def binance_signal(self)", start)
+        end = source.index("    def min_fill_delta(self)", start)
         body = source[start:end]
         self.assertNotIn("_check_stop_loss", body)
 

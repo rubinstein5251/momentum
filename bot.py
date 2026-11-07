@@ -60,7 +60,7 @@ from utils.inventory_balance import (
     plan_single_leg_buy,
     log_buy_plan,
 )
-from strategies.arbigab_engines import ArbigabEngineRouter, economic_position
+from strategies.arbigab_engines import economic_position
 from utils.momentum_inventory import PositionInventory
 from utils.momentum_risk import (
     entry_window_ok,
@@ -257,9 +257,6 @@ LOCKED_HIGH = 1.00  # 100c — market fully resolved
 
 FINAL_PRICE   = float(os.getenv("FINAL_PRICE", "0.70"))
 
-BINANCE_PRIME_THRESHOLD   = float(os.getenv("BINANCE_PRIME_THRESHOLD",   "0.20"))
-BINANCE_STALE_CUTOFF_SECS = float(os.getenv("BINANCE_STALE_CUTOFF_SECS", "5.0"))
-BINANCE_DEPTH_LIMIT       = int(os.getenv("BINANCE_DEPTH_LIMIT",          "20"))
 
 MIN_FILL_DELTA   = float(os.getenv("MIN_FILL_DELTA",   "0.05"))
 
@@ -1869,157 +1866,6 @@ def find_worker_by_asset(workers: List["MarketWorker"], asset: str) -> Optional[
     return None
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# BINANCE DEPTH SIGNAL  (display / context only — not a trade gate)
-# ═════════════════════════════════════════════════════════════════════════════
-
-class BinanceDepthSignal:
-    _instances: Dict[str, "BinanceDepthSignal"] = {}
-    _instance_lock = asyncio.Lock()
-
-    @classmethod
-    async def get_or_create(cls, symbol: str) -> "BinanceDepthSignal":
-        async with cls._instance_lock:
-            sym = symbol.upper()
-            if sym not in cls._instances:
-                inst = cls(sym)
-                cls._instances[sym] = inst
-                asyncio.create_task(inst._run())
-            return cls._instances[sym]
-
-    def __init__(self, symbol: str):
-        self.symbol      = symbol
-        self.imbalance   = 0.0
-        self.momentum    = 0.0
-        self.last_update = 0.0
-        self._history: deque = deque(maxlen=8)
-        self._price_history: deque = deque(maxlen=128)
-        self.last_trade_price = 0.0
-        self.last_trade_time = 0.0
-        self.price_delta = 0.0
-        self._running    = False
-
-    @property
-    def is_fresh(self) -> bool:
-        return (t.time() - self.last_update) < BINANCE_STALE_CUTOFF_SECS
-
-    @property
-    def is_primed(self) -> bool:
-        return self.is_fresh and abs(self.imbalance) >= BINANCE_PRIME_THRESHOLD
-
-    @property
-    def signal_label(self) -> str:
-        if not self.is_fresh:
-            return "STALE"
-        if abs(self.imbalance) >= BINANCE_PRIME_THRESHOLD:
-            return "STRONGLY BULL ↑" if self.imbalance > 0 else "STRONGLY BEAR ↓"
-        if abs(self.imbalance) >= 0.10:
-            return "MILDLY BULL ↑"   if self.imbalance > 0 else "MILDLY BEAR ↓"
-        return "NEUTRAL"
-
-    @property
-    def price_ready(self) -> bool:
-        return self.last_trade_price > 0 and len(self._price_history) >= 2
-
-    @property
-    def age_seconds(self) -> float:
-        return max(0.0, t.time() - self.last_trade_time) if self.last_trade_time else 999.0
-
-    async def _run(self):
-        if self._running:
-            return
-        self._running = True
-        depth_stream = f"{self.symbol.lower()}usdt@depth{BINANCE_DEPTH_LIMIT}@100ms"
-        trade_stream = f"{self.symbol.lower()}usdt@aggTrade"
-        url    = f"wss://stream.binance.com:9443/stream?streams={depth_stream}/{trade_stream}"
-        while True:
-            try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=15) as ws:
-                    print(f"📡 [Binance WS] Connected: {depth_stream} + {trade_stream}")
-                    async for raw in ws:
-                        msg  = json.loads(raw)
-                        data = msg.get("data", msg)
-                        event_type = data.get("e")
-                        if event_type == "aggTrade":
-                            try:
-                                px = float(data.get("p", 0.0))
-                            except (TypeError, ValueError):
-                                px = 0.0
-                            if px > 0:
-                                now = t.time()
-                                self.last_trade_price = px
-                                self.last_trade_time = now
-                                self._price_history.append((now, px))
-                                lookback = max(0.10, float(os.getenv("BINANCE_MOMENTUM_LOOKBACK", "1.0")))
-                                # Keep a longer rolling window for the entry stability
-                                # gate; price_delta still uses its shorter lookback above.
-                                history_retention = max(30.0, lookback)
-                                cutoff = now - history_retention
-                                while self._price_history and self._price_history[0][0] < cutoff:
-                                    self._price_history.popleft()
-                                if self._price_history:
-                                    base = self._price_history[0][1]
-                                    self.price_delta = (px - base) / base if base else 0.0
-                                # Event-driven wakeup: the strategy router can react to
-                                # Binance aggTrade without waiting for a Polymarket tick.
-                                with _worker_registry_lock:
-                                    targets = [w for w in _worker_registry if w.asset_type == self.symbol.lower()]
-                                for worker in targets:
-                                    asyncio.create_task(worker.on_binance_tick())
-                        bids = data.get("b", [])
-                        asks = data.get("a", [])
-                        if bids and asks:
-                            self._process(bids, asks)
-            except Exception as e:
-                print(f"⚠️ [Binance WS] {self.symbol}: {e} — reconnecting in 3s")
-                await asyncio.sleep(3)
-
-    def _process(self, bids: list, asks: list):
-        def weighted_vol(levels: list) -> float:
-            tw = tv = 0.0
-            for i, item in enumerate(levels[:20]):
-                qty = float(item[1])
-                w   = 1.0 / (i + 1) ** 0.6
-                tv += qty * w
-                tw += w
-            return tv / tw if tw > 0 else 0.0
-
-        bid_v = weighted_vol(bids)
-        ask_v = weighted_vol(asks)
-        total = bid_v + ask_v
-        if total <= 0:
-            return
-        raw = (bid_v - ask_v) / total
-        self._history.append(raw)
-        self.last_update = t.time()
-        if len(self._history) >= 4:
-            recent         = list(self._history)[-4:]
-            self.imbalance = sum(recent) / len(recent)
-            self.momentum  = recent[-1] - recent[0]
-        else:
-            self.imbalance = raw
-            self.momentum  = 0.0
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# ACCOUNT SERVICE — GLOBAL, SINGLE-INSTANCE, BOT-LEVEL
-# ═════════════════════════════════════════════════════════════════════════════
-#
-# Everything in this class represents work that is tied to the WALLET / ACCOUNT,
-# not to any individual market. There is exactly one AccountService for the
-# entire bot process, constructed once in main() and shared by reference into
-# every MarketWorker. Nothing in here is duplicated per asset.
-#
-# Responsibilities:
-#   • Single Web3 connection + single ClobClient (auth derived/created once)
-#   • One-time startup wallet audit (balances + on-chain approvals)
-#   • Shared order-placement / order-status / cancel helpers used by all workers
-#   • Shared on-chain share-balance lookups used by all workers
-#   • Global periodic PnL merge background task (+ on-demand merge_now())
-#
-# Per-market logic (price listening, entry/exit, TP/SL, per-asset PnL bookkeeping)
-# stays in MarketWorker — see below.
-# ═════════════════════════════════════════════════════════════════════════════
 
 class AccountService:
     def __init__(self):
@@ -2516,13 +2362,11 @@ class MarketWorker:
         self.seen_markets = set()
 
         self._order_lock = asyncio.Lock()
-        self._binance_eval_lock = asyncio.Lock()
         self._stop_loss_lock = asyncio.Lock()
         self._stop_loss_exit_in_flight: bool = False
         self._market_entry_guard: set[str] = set()
         self._book_cache: Dict[str, Tuple[float, Any]] = {}
         self._last_public_quote_refresh: float = 0.0
-        self.engine_router = ArbigabEngineRouter()
         self._engine_orders: Dict[str, Tuple[str, float, float, str, str]] = {}
 
         label = f"{self.asset_type.upper()} {self.window_slug}"
@@ -2548,8 +2392,6 @@ class MarketWorker:
             "stop_loss_pct":      worker_config.stop_loss_pct,
             "entry_count":        0,
             "engine":             "idle",
-            "preemptive_cancel_active": False,
-            "preemptive_cancel_side": "-",
             "position_delta":      0.0,
             "pnl_if_up":            0.0,
             "pnl_if_down":          0.0,
@@ -3179,7 +3021,6 @@ class MarketWorker:
 
     place_accumulation_fok = place_strategy_fok_buy
     place_late_entry_fok = place_strategy_fok_buy
-    place_binance_fok_entry = place_strategy_fok_buy
     place_inventory_entry_fok = place_strategy_fok_buy
     place_spread_entry_fok = place_strategy_fok_buy
 
@@ -3520,20 +3361,6 @@ class MarketWorker:
     # CORE ENTRY LOGIC — SINGLE-LEG DIRECTIONAL
     # ═════════════════════════════════════════════════════════════════════
 
-    async def on_binance_tick(self) -> None:
-        if not self.active_market:
-            return
-        if self._binance_eval_lock.locked():
-            return
-        async with self._binance_eval_lock:
-            try:
-                await self.strategy.on_binance_tick(self)
-                self._update_economic_dashboard()
-                self._update_momentum_dashboard()
-                self.update_dashboard()
-            except Exception as exc:
-                print(f"⚠️ [BINANCE FALLBACK] {self.asset_type.upper()} {self.window_slug}: {exc}")
-
     async def check_logic(self, timer: str):
         """Polymarket tick handler — directional entry + stop-loss, dashboard."""
         y = normalize_polymarket_price(float(self.prices.get("YES", 0.0) or 0.0))
@@ -3552,19 +3379,11 @@ class MarketWorker:
 
         if y <= 0 and n <= 0:
             return
-        # Keep the shared adverse-selection cancellation safeguard, but route
-        # entries through the configured exact-99c strategy. The legacy three-
-        # engine router uses bid/maker prices and could never satisfy the exact
-        # ask-price rule consistently.
+        # Evaluate the single-position strategy using Polymarket market data.
         self._update_economic_dashboard()
-        await self.engine_router.cancel.run(self)
         await self.strategy.on_market_tick(self)
         self._update_economic_dashboard()
         self.update_dashboard()
-
-    def binance_signal(self):
-        symbol = self.asset_type.upper()
-        return BinanceDepthSignal._instances.get(symbol)
 
     def min_fill_delta(self) -> float:
         return MIN_FILL_DELTA
@@ -3572,9 +3391,7 @@ class MarketWorker:
     def _update_economic_dashboard(self) -> None:
         """Refresh dashboard economics from the current single-leg inventory.
 
-        The legacy execution engines were removed, but these read-only position
-        metrics are still used by the listener and Binance tick handlers. Keep
-        the method available so a dashboard refresh cannot crash the listeners.
+        This read-only calculation publishes current position economics.
         This method only calculates and publishes metrics; it does not place,
         cancel, or otherwise alter orders.
         """
@@ -3618,7 +3435,6 @@ class MarketWorker:
         _strategy_buy_authorized: bool = False,
         _inventory_accumulation_authorized: bool = False,
         _late_entry_authorized: bool = False,
-        _binance_fok_authorized: bool = False,
         _inventory_authorized: bool = False,
         _spread_capture_authorized: bool = False,
         _recovery_authorized: bool = False,
@@ -3653,7 +3469,6 @@ class MarketWorker:
                 _strategy_buy_authorized
                 or _inventory_accumulation_authorized
                 or _late_entry_authorized
-                or _binance_fok_authorized
                 or _inventory_authorized
                 or _spread_capture_authorized
             )
@@ -4275,99 +4090,6 @@ class MarketWorker:
     async def start(self):
         """Per-worker trading loop for one (asset, window) pair."""
         wc = self.worker_config
-        # Start the existing shared Binance stream for dashboard/market context.
-        # Directional entries no longer use Binance movement as an entry filter.
-        try:
-            await BinanceDepthSignal.get_or_create(self.asset_type.upper())
-        except Exception as exc:
-            print(f"⚠️ [BINANCE INIT] {self.asset_type.upper()}: {exc}")
-
-        print(f"🤖 EmilianoBot — 93c Entry / 39% Stop Loss (FOK) → "
-              f"{self.asset_type.upper()} {self.window_slug} markets...")
-        print(f"  Market interval   : {wc.window} ({wc.interval_seconds}s)")
-        print(f"  Listener window   : final {wc.listener_activate_secs}s")
-        print(f"  Minimum entry     : >= {wc.entry_price:.2f} (executable ask)")
-        print(f"  Stop loss         : {wc.stop_loss_pct:.0%} from confirmed average fill")
-        if wc.entry_window_seconds > 0:
-            print(f"  Entry window      : final {wc.entry_window_seconds}s")
-        else:
-            print(f"  Entry window      : disabled (whole market)")
-        print(f"  Order type        : FOK only")
-        if wc.random_order_size:
-            order_size_label = (
-                f"{wc.order_size_min}-{wc.order_size_max} shares random "
-                f"(max order {wc.max_order_size})"
-            )
-        else:
-            order_size_label = f"{wc.order_size_max} shares (max order {wc.max_order_size})"
-        print(f"  Order size        : {order_size_label}")
-        print(f"  Max inventory     : {wc.max_shares} shares per leg")
-        print(f"  Fill monitor      : {wc.fill_timeout_ms}ms timeout / "
-              f"{wc.fill_poll_ms}ms poll")
-        if self.is_dry_run():
-            print(f"  Dry-run fill delay: {wc.dry_run_fill_delay_min_ms}-"
-                  f"{wc.dry_run_fill_delay_max_ms}ms per leg")
-        print(f"  Dry run           : {self.is_dry_run()}")
-        from utils.graceful_shutdown import shutdown_requested
-
-        session = requests.Session()
-        sec = wc.interval_seconds
-        while not shutdown_requested():
-            try:
-                now_ts     = int(datetime.now(timezone.utc).timestamp())
-                intervals  = list(self.current_interval_starts(now_ts))
-                candidates = []
-                for ts in intervals:
-                    slug = wc.market_slug(ts)
-                    try:
-                        resp = session.get(f"{GAMMA_URL}?slug={slug}", timeout=2).json()
-                        if resp:
-                            candidates.append({
-                                "url":      f"https://polymarket.com/event/{resp[0]['slug']}",
-                                "start_ts": ts,
-                                "slug":     slug,
-                            })
-                    except Exception:
-                        continue
-
-                current = [m for m in candidates if m["start_ts"] <= now_ts < m["start_ts"] + sec]
-                if current:
-                    target = current[0]
-                else:
-                    future = [m for m in candidates if m["start_ts"] > now_ts]
-                    if not future:
-                        print("⏳ No market → retrying...")
-                        await asyncio.sleep(2)
-                        continue
-                    target = min(future, key=lambda x: x["start_ts"])
-
-                print(f"\n🎯 Target: {target['slug']}")
-                if not self.fetch_target_market(target["url"]):
-                    print("❌ Market fetch failed → retry loop")
-                    await asyncio.sleep(1)
-                    continue
-
-                await self.reset_state()
-                now_ts = int(datetime.now(timezone.utc).timestamp())
-                start  = target["start_ts"]
-                if start <= now_ts < start + sec:
-                    print("⚡ Already inside active market → starting immediately")
-
-                print("📡 Starting quote poll + WebSocket listener...")
-                poll_task = asyncio.create_task(self.quote_poll_loop())
-                try:
-                    await self.price_listener()
-                finally:
-                    poll_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await poll_task
-                print("🏁 Market complete → instant rescan")
-
-            except Exception as e:
-                print(f"❌ Scheduler Error: {e}")
-                await asyncio.sleep(2)
-
-
 # Backward-compatible alias: existing external code/imports that reference
 # `EmilianoBot` (e.g. main.py) keep working without modification.
 EmilianoBot = MarketWorker

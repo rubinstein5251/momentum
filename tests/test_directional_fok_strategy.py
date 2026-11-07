@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -92,12 +91,6 @@ class StrategyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return resolve_minimum_entry_price(cfg.entry_price)
 
         worker.resolved_entry_fok_limit = resolved_entry_fok_limit
-        now = time.time()
-        worker.binance_signal = lambda: SimpleNamespace(
-            _price_history=[(now - 10.0, 100.0), (now - 7.0, 100.02),
-                            (now - 4.5, 100.01), (now - 2.0, 100.01),
-                            (now, 100.02)]
-        )
         worker.record_fill_idempotent = lambda *a, **k: True
         worker.log_trade = lambda *a, **k: None
         return worker

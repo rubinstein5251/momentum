@@ -402,9 +402,6 @@ class DirectionalFokStrategy:
         await self._try_entry(worker, cid)
         self._publish_dashboard(worker)
 
-    async def on_binance_tick(self, worker: "MarketWorker") -> None:
-        await self.on_market_tick(worker)
-
     async def evaluate(self, worker: "MarketWorker"):
         return None
 
@@ -416,6 +413,4 @@ MomentumStrategy = DirectionalFokStrategy
 GabagoolStrategy = DirectionalFokStrategy
 SpreadCaptureStrategy = DirectionalFokStrategy
 LateEntryStrategy = DirectionalFokStrategy
-BinanceTriggeredFokStrategy = DirectionalFokStrategy
-BinanceFokStrategy = DirectionalFokStrategy
 InventoryAccumulationStrategy = DirectionalFokStrategy

@@ -1,12 +1,9 @@
-"""Safety-only market helpers for the exact-99c, single-leg strategy.
-
-Legacy momentum, spread-capture, and market-making order engines are removed.
-This module retains position accounting and preemptive cancellation only.
+"""Read-only position economics for the single-position directional strategy.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot import MarketWorker
@@ -65,60 +62,3 @@ def economic_position(worker: "MarketWorker") -> EconomicPosition:
 
 
 
-class BinancePreemptiveCancel:
-    """Shared adverse-selection gate for every worker.
-
-    A sharp Binance move cancels the resting token most likely to be filled
-    toxically before new quotes are considered.  The signal is deliberately
-    conservative: stale Binance data never triggers a cancellation.
-    """
-
-    @staticmethod
-    def exposed_side(worker: "MarketWorker") -> Optional[str]:
-        signal = worker.binance_signal()
-        if signal is None or not signal.is_fresh:
-            return None
-        # Positive Binance move makes resting NO/Down bids vulnerable;
-        # negative move makes resting YES/Up bids vulnerable.
-        if signal.price_delta <= -worker.worker_config.preemptive_cancel_price_delta:
-            return "YES"
-        if signal.price_delta >= worker.worker_config.preemptive_cancel_price_delta:
-            return "NO"
-        if signal.momentum <= -worker.worker_config.preemptive_cancel_momentum:
-            return "YES"
-        if signal.momentum >= worker.worker_config.preemptive_cancel_momentum:
-            return "NO"
-        if signal.imbalance <= -worker.worker_config.preemptive_cancel_imbalance:
-            return "YES"
-        if signal.imbalance >= worker.worker_config.preemptive_cancel_imbalance:
-            return "NO"
-        return None
-
-    async def run(self, worker: "MarketWorker") -> bool:
-        if not worker.worker_config.preemptive_cancel_enabled:
-            return False
-        side = self.exposed_side(worker)
-        if not side:
-            worker.dashboard["preemptive_cancel_active"] = False
-            return False
-        worker.dashboard["preemptive_cancel_active"] = True
-        worker.dashboard["preemptive_cancel_side"] = side
-        cancelled = await worker.cancel_engine_orders(side=side)
-        if cancelled:
-            print(
-                f"🚨 [PREEMPTIVE CANCEL] {worker.asset_type.upper()} {worker.window_slug} | "
-                f"Binance adverse move -> cancelled {side} resting exposure ({cancelled})"
-            )
-        return cancelled > 0
-
-
-class ArbigabEngineRouter:
-    """Safety-only router. Legacy momentum, spread and market-making engines are removed."""
-
-    def __init__(self) -> None:
-        self.cancel = BinancePreemptiveCancel()
-
-    async def on_tick(self, worker: "MarketWorker") -> bool:
-        worker.dashboard["engine"] = "risk"
-        await self.cancel.run(worker)
-        return False
