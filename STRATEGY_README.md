@@ -70,3 +70,18 @@ an access restriction imposed by Polymarket. Removing the Binance integration do
 not change that restriction or make order submission available in a blocked region.
 Check Polymarket's current supported-region information and do not attempt to
 circumvent the restriction.
+
+## Market discovery and loading
+
+Each enabled worker scans Polymarket Gamma for the current and next interval slug
+(e.g. `btc-updown-5m-<unix-start>`) every `MARKET_SCAN_INTERVAL_SECONDS`
+(default `3`). The scanner retries when Gamma has not published a market yet,
+validates the market expiry and both CLOB token IDs, then starts the REST quote
+poller and Polymarket market WebSocket listener. A worker does not clear inventory
+or move to another market until settlement is confirmed.
+
+If the dashboard remains on `WAITING FOR MARKET`, check the Render logs for
+`[MARKET SCANNER]`, `[MARKET]`, and `market_scan_request_failed`. These identify
+whether Gamma is unreachable, the expected slug is not published, or the response
+metadata is incomplete. The scan interval can be adjusted with
+`MARKET_SCAN_INTERVAL_SECONDS` (minimum effective value: one second).

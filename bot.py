@@ -3169,64 +3169,105 @@ class MarketWorker:
     # ── Market fetching ────────────────────────────────────────────────
 
     def fetch_target_market(self, url: str) -> bool:
+        """Load and validate a Polymarket market from its event URL/slug."""
         try:
             match = re.search(r"/(?:event|market)/([^/?#]+)", url)
-            if not match:
-                print(f"❌ Could not parse slug from URL: {url}")
+            slug = match.group(1) if match else str(url).strip().rstrip("/").split("/")[-1]
+            if not slug:
+                print(f"❌ [MARKET] Invalid market URL/slug: {url!r}")
                 return False
-            slug = match.group(1)
             if slug in self.processed_markets:
-                print(f"⏭️  BLOCKED: Already processed market: {slug}")
+                print(f"⏭️ [MARKET] Already processed: {slug}")
                 return False
-            resp = requests.get(f"{GAMMA_URL}?slug={slug}").json()
-            if not resp:
-                print(f"❌ API returned no data for slug: {slug}")
+
+            response = requests.get(GAMMA_URL, params={"slug": slug}, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                markets = payload.get("markets") or [payload]
+            else:
+                markets = payload
+            if not isinstance(markets, list) or not markets:
+                print(f"⏳ [MARKET] Gamma has not published {slug} yet.")
                 return False
-            m            = resp[0]
-            end_date_str = m.get("endDate")
-            end_dt       = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-            now          = datetime.now(timezone.utc)
-            if now >= end_dt:
-                print(f"🛑 Market EXPIRED.")
+
+            market = next((m for m in markets if isinstance(m, dict) and m.get("slug", slug) == slug), None)
+            if market is None:
+                market = next((m for m in markets if isinstance(m, dict)), None)
+            if market is None:
+                print(f"⚠️ [MARKET] Gamma returned an invalid payload for {slug}.")
                 return False
-            clob_ids = m.get("clobTokenIds")
-            if isinstance(clob_ids, str):
-                clob_ids = json.loads(clob_ids)
-            outcomes = m.get("outcomes")
+
+            end_value = market.get("endDate") or market.get("endDateIso") or market.get("end_date")
+            if not end_value:
+                print(f"⚠️ [MARKET] Missing end date for {slug}.")
+                return False
+            end_dt = datetime.fromisoformat(str(end_value).replace("Z", "+00:00"))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            end_dt = end_dt.astimezone(timezone.utc)
+            if datetime.now(timezone.utc) >= end_dt:
+                print(f"⌛ [MARKET] {slug} has already expired.")
+                return False
+
+            token_ids = market.get("clobTokenIds") or market.get("clob_token_ids")
+            if isinstance(token_ids, str):
+                token_ids = json.loads(token_ids)
+            outcomes = market.get("outcomes") or []
             if isinstance(outcomes, str):
-                try:
-                    outcomes = json.loads(outcomes)
-                except json.JSONDecodeError:
-                    outcomes = None
-            yes_id = str(clob_ids[0])
-            no_id = str(clob_ids[1])
-            if outcomes and len(outcomes) >= 2 and len(clob_ids) >= 2:
-                labels = [str(o).strip().lower() for o in outcomes]
-                up_idx = next(
-                    (i for i, lab in enumerate(labels) if lab in ("up", "yes", "higher")),
-                    None,
-                )
-                down_idx = next(
-                    (i for i, lab in enumerate(labels) if lab in ("down", "no", "lower")),
-                    None,
-                )
-                if up_idx is not None and down_idx is not None:
-                    yes_id = str(clob_ids[up_idx])
-                    no_id = str(clob_ids[down_idx])
-            condition_id = m.get("conditionId") or m.get("condition_id") or slug
+                outcomes = json.loads(outcomes)
+            if not isinstance(token_ids, (list, tuple)) or len(token_ids) < 2:
+                print(f"⚠️ [MARKET] {slug} has no valid pair of CLOB token IDs yet.")
+                return False
+            if not isinstance(outcomes, (list, tuple)) or len(outcomes) < 2:
+                outcomes = ["Up", "Down"]
+
+            labels = [str(item).strip().lower() for item in outcomes]
+            up_idx = next((i for i, label in enumerate(labels) if label in ("up", "yes", "higher")), 0)
+            down_idx = next((i for i, label in enumerate(labels) if label in ("down", "no", "lower")), 1)
+            if up_idx == down_idx or max(up_idx, down_idx) >= len(token_ids):
+                up_idx, down_idx = 0, 1
+
+            condition_id = market.get("conditionId") or market.get("condition_id") or slug
             self.active_market = {
-                "question": m.get('question'),
-                "yes_id":   yes_id,
-                "no_id":    no_id,
-                "expiry":   end_dt,
-                "slug":     slug,
+                "question": market.get("question") or market.get("title") or slug,
+                "yes_id": str(token_ids[up_idx]),
+                "no_id": str(token_ids[down_idx]),
+                "expiry": end_dt,
+                "slug": str(market.get("slug") or slug),
                 "condition_id": str(condition_id),
             }
             self.market_slug = slug
-            print(f"🎯 Market: {self.active_market['question']} | Slug: {slug}")
+            try:
+                slug_start = int(str(slug).rsplit("-", 1)[-1])
+            except (TypeError, ValueError):
+                slug_start = self._interval_start(int(datetime.now(timezone.utc).timestamp()))
+            self.market_start_time = float(slug_start)
+            self._last_public_quote_refresh = 0.0
+            self._book_cache.clear()
+            self._ws_market_data_stale = True
+            self.dashboard.update({
+                "status": "MARKET LOADED",
+                "strategy_display_state": "MARKET LOADED",
+                "market_id": str(condition_id),
+                "market_slug": slug,
+                "entry_block_reason": "",
+                "timer": self.get_listener_countdown(),
+            })
+            print(
+                f"🎯 [MARKET LOADED] {self.asset_type.upper()} {self.window_slug} | "
+                f"{self.active_market['question']} | expires {end_dt.isoformat()}"
+            )
             return True
-        except Exception as e:
-            print(f"Market Fetch Error: {e}")
+        except (requests.RequestException, ValueError, TypeError, KeyError, IndexError) as exc:
+            print(f"⚠️ [MARKET] Could not load {url}: {exc}")
+            exec_log("market_fetch_failed", asset=self.asset_type, window=self.window_slug,
+                     market=str(url), error=str(exc))
+            return False
+        except Exception as exc:
+            print(f"⚠️ [MARKET] Unexpected load error for {url}: {exc}")
+            exec_log("market_fetch_unexpected_error", asset=self.asset_type, window=self.window_slug,
+                     market=str(url), error=str(exc))
             return False
 
     # ── WebSocket price listener ───────────────────────────────────────
@@ -3254,8 +3295,7 @@ class MarketWorker:
         async for ws in websockets.connect(WS_URL, ping_interval=20, ping_timeout=20, close_timeout=10):
             try:
                 sub_msg = {
-                    "operation":  "subscribe",
-                    "type":       "market",
+                    "type": "market",
                     "assets_ids": [self.active_market["yes_id"], self.active_market["no_id"]],
                 }
                 await ws.send(json.dumps(sub_msg))
@@ -3282,6 +3322,20 @@ class MarketWorker:
                     for ev in events:
                         e_type = ev.get("event_type")
                         if e_type in ["book", "initial_state"]:
+                            event_asset_id = ev.get("asset_id")
+                            if event_asset_id:
+                                ask, bid = self._book_best_prices(ev)
+                                target_side = (
+                                    "YES" if str(event_asset_id) == self.active_market["yes_id"]
+                                    else "NO" if str(event_asset_id) == self.active_market["no_id"]
+                                    else None
+                                )
+                                if target_side:
+                                    if ask > 0:
+                                        self.prices[target_side] = normalize_polymarket_price(ask)
+                                        self._touch_quote(target_side)
+                                    if bid > 0:
+                                        self.bids[target_side] = normalize_polymarket_price(bid)
                             for asset in ev.get("assets", []):
                                 aid = asset.get("asset_id")
                                 ask = float(asset.get("best_ask", 0))
@@ -4057,24 +4111,48 @@ class MarketWorker:
         return base, base + self._interval_seconds()
 
     def get_candidate_markets(self, asset: Optional[str] = None) -> list:
-        slug_asset = (asset or self.asset_type).lower()
-        now       = int(datetime.now(timezone.utc).timestamp())
-        intervals = list(self.current_interval_starts(now))
-        markets   = []
-        sec = self._interval_seconds()
-        for ts in intervals:
-            slug = self.worker_config.market_slug(ts)
+        """Return current and next interval markets published by Gamma."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        current_start, next_start = self.current_interval_starts(now)
+        candidates = []
+        for start_ts in (current_start, next_start):
+            slug = self.worker_config.market_slug(start_ts)
+            if slug in self.processed_markets:
+                continue
             try:
-                resp = requests.get(f"{GAMMA_URL}?slug={slug}").json()
-                if resp:
-                    markets.append({
-                        "slug":     slug,
-                        "url":      f"https://polymarket.com/event/{resp[0]['slug']}",
-                        "start_ts": ts,
-                    })
-            except Exception:
-                pass
-        return markets
+                response = requests.get(GAMMA_URL, params={"slug": slug}, timeout=8)
+                response.raise_for_status()
+                payload = response.json()
+                markets = payload.get("markets", []) if isinstance(payload, dict) else payload
+                if not isinstance(markets, list) or not markets:
+                    continue
+                market = next((m for m in markets if isinstance(m, dict)), None)
+                if not market:
+                    continue
+                returned_slug = str(market.get("slug") or slug)
+                if returned_slug != slug:
+                    continue
+                end_date = market.get("endDate") or market.get("endDateIso") or market.get("end_date")
+                if not end_date:
+                    continue
+                end_dt = datetime.fromisoformat(str(end_date).replace("Z", "+00:00"))
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                if end_dt <= datetime.now(timezone.utc):
+                    continue
+                candidates.append({
+                    "slug": slug,
+                    "url": f"https://polymarket.com/event/{slug}",
+                    "start_ts": start_ts,
+                    "end_dt": end_dt,
+                })
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                exec_log("market_scan_request_failed", asset=self.asset_type,
+                         window=self.window_slug, slug=slug, error=str(exc))
+            except Exception as exc:
+                exec_log("market_scan_failed", asset=self.asset_type,
+                         window=self.window_slug, slug=slug, error=str(exc))
+        return candidates
 
     def pick_next_market(self, markets: list) -> Optional[dict]:
         now_ts  = int(datetime.now(timezone.utc).timestamp())
@@ -4088,8 +4166,144 @@ class MarketWorker:
         return min(future, key=lambda x: x["start_ts"])
 
     async def start(self):
-        """Per-worker trading loop for one (asset, window) pair."""
-        wc = self.worker_config
+        """Discover each market, run its quote/WS loops, then safely advance."""
+        from utils.graceful_shutdown import shutdown_requested
+
+        scan_delay = max(1.0, float(os.getenv("MARKET_SCAN_INTERVAL_SECONDS", "3")))
+        print(
+            f"🔎 [MARKET SCANNER] {self.asset_type.upper()} {self.window_slug} | "
+            f"Gamma polling every {scan_delay:g}s"
+        )
+
+        while not shutdown_requested():
+            if self.active_market is None:
+                try:
+                    candidates = await asyncio.to_thread(self.get_candidate_markets)
+                    candidate = self.pick_next_market(candidates)
+                    if candidate and await asyncio.to_thread(self.fetch_target_market, candidate["url"]):
+                        self.exited = False
+                        self.dashboard["status"] = "MARKET LOADED"
+                        self.dashboard["strategy_display_state"] = "MARKET LOADED"
+                    else:
+                        self.dashboard["status"] = "WAITING FOR MARKET"
+                        self.dashboard["strategy_display_state"] = "WAITING FOR MARKET"
+                        self.dashboard["timer"] = "--:--"
+                        if not candidates:
+                            self.dashboard["entry_block_reason"] = "GAMMA_MARKET_NOT_PUBLISHED"
+                        await asyncio.sleep(scan_delay)
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.dashboard["status"] = "MARKET SCAN ERROR"
+                    self.dashboard["strategy_display_state"] = "MARKET SCAN ERROR"
+                    self.dashboard["entry_block_reason"] = str(exc)[:160]
+                    exec_log("market_scanner_error", asset=self.asset_type,
+                             window=self.window_slug, error=str(exc))
+                    print(f"⚠️ [MARKET SCANNER] {self.asset_type.upper()} {self.window_slug}: {exc}")
+                    await asyncio.sleep(scan_delay)
+                    continue
+
+            # A market may be discovered shortly before its start. Keep the
+            # quote loop alive for the whole round; entry timing is enforced by
+            # the strategy's configured final-seconds window.
+            market = self.active_market
+            if not market:
+                continue
+            slug = str(market.get("slug") or self.market_slug or "")
+            expiry = market.get("expiry")
+            if not isinstance(expiry, datetime):
+                self.active_market = None
+                await asyncio.sleep(scan_delay)
+                continue
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+                market["expiry"] = expiry
+
+            self.exited = False
+            self._market_expiry_handled = False
+            self.dashboard["status"] = "MARKET ACTIVE"
+            self.dashboard["strategy_display_state"] = "MARKET ACTIVE"
+            quote_task = asyncio.create_task(self.quote_poll_loop(), name=f"quotes-{self.asset_type}-{self.window_slug}")
+            listener_task = asyncio.create_task(self.price_listener(), name=f"ws-{self.asset_type}-{self.window_slug}")
+            try:
+                delay = max(0.0, (expiry - datetime.now(timezone.utc)).total_seconds())
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                # Stop data loops before settlement so they cannot race a
+                # reset or write quotes into the next market.
+                self.exited = True
+                for task in (quote_task, listener_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(quote_task, listener_task, return_exceptions=True)
+
+            if shutdown_requested():
+                break
+
+            try:
+                await self.on_market_expired()
+            except Exception as exc:
+                exec_log("market_expiry_processing_failed", asset=self.asset_type,
+                         window=self.window_slug, slug=slug, error=str(exc))
+                print(f"⚠️ [SETTLEMENT] {slug}: {exc}")
+
+            # Never discard inventory or permit new exposure if settlement is
+            # not confirmed. Retry the resolution read instead of resetting.
+            while not shutdown_requested() and self.dashboard.get("settlement_status") != "settled":
+                self.dashboard["status"] = "WAITING FOR SETTLEMENT"
+                self.dashboard["strategy_display_state"] = "WAITING FOR SETTLEMENT"
+                await asyncio.sleep(5)
+                try:
+                    self._refresh_market_resolution(slug)
+                    await self.on_market_expired()
+                except Exception as exc:
+                    exec_log("market_settlement_retry_failed", asset=self.asset_type,
+                             window=self.window_slug, slug=slug, error=str(exc))
+
+            if shutdown_requested():
+                break
+
+            if slug:
+                self.processed_markets.add(slug)
+                self.seen_markets.add(slug)
+            self.active_market = None
+            await self.reset_state()
+            self.dashboard["status"] = "WAITING FOR MARKET"
+            self.dashboard["strategy_display_state"] = "WAITING FOR MARKET"
+            await asyncio.sleep(0.2)
+
+        print(f"🛑 [MARKET SCANNER] Stopped {self.asset_type.upper()} {self.window_slug}.")
+
+    def _refresh_market_resolution(self, slug: str) -> None:
+        """Use Gamma's final outcome prices when the CLOB quote is unavailable."""
+        if not slug:
+            return
+        response = requests.get(GAMMA_URL, params={"slug": slug}, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+        markets = payload.get("markets", []) if isinstance(payload, dict) else payload
+        if not isinstance(markets, list) or not markets:
+            return
+        market = next((m for m in markets if isinstance(m, dict)), None)
+        if not market:
+            return
+        raw_prices = market.get("outcomePrices") or market.get("outcome_prices")
+        outcomes = market.get("outcomes") or ["Up", "Down"]
+        if isinstance(raw_prices, str):
+            raw_prices = json.loads(raw_prices)
+        if isinstance(outcomes, str):
+            outcomes = json.loads(outcomes)
+        if not isinstance(raw_prices, (list, tuple)) or len(raw_prices) < 2:
+            return
+        labels = [str(x).strip().lower() for x in outcomes]
+        up_idx = next((i for i, x in enumerate(labels) if x in ("up", "yes", "higher")), 0)
+        down_idx = next((i for i, x in enumerate(labels) if x in ("down", "no", "lower")), 1)
+        self.prices["YES"] = normalize_polymarket_price(float(raw_prices[up_idx]))
+        self.prices["NO"] = normalize_polymarket_price(float(raw_prices[down_idx]))
+
 # Backward-compatible alias: existing external code/imports that reference
 # `EmilianoBot` (e.g. main.py) keep working without modification.
 EmilianoBot = MarketWorker
